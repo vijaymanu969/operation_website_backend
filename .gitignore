@@ -1,0 +1,14 @@
+# Environment (contains secrets)
+.env
+
+# Node.js
+node_modules/
+custom-api/node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres_data/
+minio_data/
