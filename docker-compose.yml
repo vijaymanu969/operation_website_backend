@@ -229,7 +229,7 @@ services:
   # ---------------------------------------------------------------------------
   # Celume Ops — Custom API
   # ---------------------------------------------------------------------------
-  custom_api:
+  celume_custom_api:
     build:
       context: ./custom-api
       dockerfile: Dockerfile
