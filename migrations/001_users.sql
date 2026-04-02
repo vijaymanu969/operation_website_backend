@@ -50,6 +50,6 @@ INSERT INTO ops_users (name, email, password_hash, role)
 VALUES (
   'Super Admin',
   'admin@celume.com',
-  '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
+  '$2a$10$zMLULV9CnWGqO.7z3HzCv.u2qwKBSvvYlsgwWBsCSNYiBh90STk3K',
   'super_admin'
 );
