@@ -1,11 +1,12 @@
 const pool = require('../db');
 const { findOrCreateDirectConversation } = require('../helpers/chatHelpers');
+const { emitToConversation, emitToUser } = require('../socket');
 
 async function listConversations(req, res) {
   try {
     const userId = req.user.id;
+    const { search } = req.query;
 
-    // Get all conversations the user is a member of
     const convResult = await pool.query(
       `SELECT c.id, c.type, c.name, c.created_at
        FROM ops_conversations c
@@ -17,7 +18,6 @@ async function listConversations(req, res) {
     const conversations = [];
 
     for (const conv of convResult.rows) {
-      // Get members
       const members = await pool.query(
         `SELECT u.id, u.name, u.role
          FROM ops_conversation_members m
@@ -26,7 +26,6 @@ async function listConversations(req, res) {
         [conv.id]
       );
 
-      // Get last message
       const lastMsg = await pool.query(
         `SELECT msg.content, msg.type, msg.created_at, u.name AS sender_name
          FROM ops_messages msg
@@ -37,11 +36,18 @@ async function listConversations(req, res) {
         [conv.id]
       );
 
-      // For direct conversations, set display_name to the other member
       let displayName = conv.name;
       if (conv.type === 'direct') {
         const other = members.rows.find(m => m.id !== userId);
         displayName = other ? other.name : 'Unknown';
+      }
+
+      // Apply search filter
+      if (search) {
+        const q = search.toLowerCase();
+        const nameMatch = displayName && displayName.toLowerCase().includes(q);
+        const memberMatch = members.rows.some(m => m.name.toLowerCase().includes(q));
+        if (!nameMatch && !memberMatch) continue;
       }
 
       conversations.push({
@@ -54,7 +60,6 @@ async function listConversations(req, res) {
       });
     }
 
-    // Sort by last message time (most recent first)
     conversations.sort((a, b) => {
       const aTime = a.last_message ? new Date(a.last_message.created_at) : new Date(a.created_at);
       const bTime = b.last_message ? new Date(b.last_message.created_at) : new Date(b.created_at);
@@ -90,7 +95,6 @@ async function createConversation(req, res) {
 
       const convId = await findOrCreateDirectConversation(userId, otherId);
 
-      // Fetch full conversation to return
       const conv = await pool.query('SELECT * FROM ops_conversations WHERE id = $1', [convId]);
       const members = await pool.query(
         `SELECT u.id, u.name, u.role
@@ -120,7 +124,6 @@ async function createConversation(req, res) {
       );
       const convId = conv.rows[0].id;
 
-      // Add current user + all member_ids
       const allMembers = [...new Set([userId, ...member_ids])];
       for (const memberId of allMembers) {
         await pool.query(
@@ -157,7 +160,6 @@ async function getMessages(req, res) {
     let limit = parseInt(req.query.limit) || 50;
     if (limit > 100) limit = 100;
 
-    // Verify user is a member
     const membership = await pool.query(
       'SELECT 1 FROM ops_conversation_members WHERE conversation_id = $1 AND user_id = $2',
       [id, userId]
@@ -190,20 +192,33 @@ async function getMessages(req, res) {
     const hasMore = result.rows.length > limit;
     const messages = result.rows.slice(0, limit);
 
-    // For task_review messages, fetch task details
+    // For task_review messages, fetch task details (using junction tables)
     for (const msg of messages) {
       if (msg.type === 'task_review' && msg.task_id) {
         const taskResult = await pool.query(
           `SELECT t.id, t.title, t.description, t.priority, t.status,
-                  t.person_id, t.reviewer_id, t.date, t.column_group,
-                  p.name AS person_name, r.name AS reviewer_name
+                  t.date, t.column_group
            FROM ops_tasks t
-           LEFT JOIN ops_users p ON p.id = t.person_id
-           LEFT JOIN ops_users r ON r.id = t.reviewer_id
            WHERE t.id = $1`,
           [msg.task_id]
         );
-        msg.task = taskResult.rows[0] || null;
+        if (taskResult.rows[0]) {
+          const task = taskResult.rows[0];
+          // Fetch assignees and reviewers
+          const assignees = await pool.query(
+            `SELECT u.id, u.name FROM ops_task_assignees a JOIN ops_users u ON u.id = a.user_id WHERE a.task_id = $1`,
+            [msg.task_id]
+          );
+          const reviewers = await pool.query(
+            `SELECT u.id, u.name FROM ops_task_reviewers r JOIN ops_users u ON u.id = r.user_id WHERE r.task_id = $1`,
+            [msg.task_id]
+          );
+          task.assignees = assignees.rows;
+          task.reviewers = reviewers.rows;
+          msg.task = task;
+        } else {
+          msg.task = null;
+        }
       }
     }
 
@@ -223,7 +238,6 @@ async function sendMessage(req, res) {
       return res.status(400).json({ error: 'Message content is required' });
     }
 
-    // Verify user is a member
     const membership = await pool.query(
       'SELECT 1 FROM ops_conversation_members WHERE conversation_id = $1 AND user_id = $2',
       [id, userId]
@@ -242,6 +256,23 @@ async function sendMessage(req, res) {
     const message = result.rows[0];
     message.sender_name = req.user.name;
 
+    // Emit real-time event to conversation room
+    emitToConversation(id, 'new_message', message);
+
+    // Also notify all members who aren't in the room
+    const members = await pool.query(
+      'SELECT user_id FROM ops_conversation_members WHERE conversation_id = $1 AND user_id != $2',
+      [id, userId]
+    );
+    for (const m of members.rows) {
+      emitToUser(m.user_id, 'notification', {
+        type: 'new_message',
+        conversation_id: id,
+        sender_name: req.user.name,
+        content: content.trim().substring(0, 100),
+      });
+    }
+
     return res.status(201).json(message);
   } catch (err) {
     return res.status(500).json({ error: 'Failed to send message' });
@@ -258,12 +289,7 @@ async function reviewTask(req, res) {
       return res.status(400).json({ error: 'Status must be completed or rejected' });
     }
 
-    // Fetch the message
-    const msgResult = await pool.query(
-      'SELECT * FROM ops_messages WHERE id = $1',
-      [id]
-    );
-
+    const msgResult = await pool.query('SELECT * FROM ops_messages WHERE id = $1', [id]);
     if (msgResult.rows.length === 0) {
       return res.status(404).json({ error: 'Message not found' });
     }
@@ -278,43 +304,34 @@ async function reviewTask(req, res) {
       return res.status(400).json({ error: 'This review has already been processed' });
     }
 
-    // Check the user is the reviewer of the linked task
-    const taskResult = await pool.query(
-      'SELECT id, reviewer_id, status FROM ops_tasks WHERE id = $1',
-      [message.task_id]
+    // Check user is a reviewer of the linked task
+    const reviewerCheck = await pool.query(
+      'SELECT 1 FROM ops_task_reviewers WHERE task_id = $1 AND user_id = $2',
+      [message.task_id, userId]
     );
 
-    if (taskResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Linked task not found' });
+    if (reviewerCheck.rows.length === 0 && req.user.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only a reviewer can approve or reject this task' });
     }
 
-    const task = taskResult.rows[0];
-
-    if (task.reviewer_id !== userId && req.user.role !== 'super_admin') {
-      return res.status(403).json({ error: 'Only the reviewer can approve or reject this task' });
-    }
-
-    // Transaction: update both message and task
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Update message review status
       await client.query(
         'UPDATE ops_messages SET review_status = $1 WHERE id = $2',
         [status, id]
       );
 
-      // Update task status
       const newTaskStatus = status === 'completed' ? 'completed' : 'not_completed';
-      const updatedTask = await client.query(
-        'UPDATE ops_tasks SET status = $1 WHERE id = $2 RETURNING *',
-        [newTaskStatus, message.task_id]
-      );
+      let updateSQL = 'UPDATE ops_tasks SET status = $1';
+      if (status === 'completed') updateSQL += ', completed_at = CURRENT_DATE';
+      updateSQL += ' WHERE id = $2 RETURNING *';
+
+      const updatedTask = await client.query(updateSQL, [newTaskStatus, message.task_id]);
 
       await client.query('COMMIT');
 
-      // Fetch updated message
       const updatedMsg = await pool.query(
         `SELECT msg.*, u.name AS sender_name
          FROM ops_messages msg
@@ -322,6 +339,27 @@ async function reviewTask(req, res) {
          WHERE msg.id = $1`,
         [id]
       );
+
+      // Emit real-time event
+      emitToConversation(message.conversation_id, 'review_updated', {
+        message_id: id,
+        review_status: status,
+        task_status: updatedTask.rows[0].status,
+      });
+
+      // Notify assignees
+      const assignees = await pool.query(
+        'SELECT user_id FROM ops_task_assignees WHERE task_id = $1', [message.task_id]
+      );
+      for (const a of assignees.rows) {
+        emitToUser(a.user_id, 'notification', {
+          type: 'task_review_result',
+          task_id: message.task_id,
+          task_title: updatedTask.rows[0].title,
+          result: status,
+          reviewer_name: req.user.name,
+        });
+      }
 
       return res.json({
         message: updatedMsg.rows[0],
