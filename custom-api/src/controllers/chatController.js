@@ -19,7 +19,7 @@ async function listConversations(req, res) {
 
     for (const conv of convResult.rows) {
       const members = await pool.query(
-        `SELECT u.id, u.name, u.role
+        `SELECT u.id, u.name, u.role, u.color
          FROM ops_conversation_members m
          JOIN ops_users u ON u.id = m.user_id
          WHERE m.conversation_id = $1`,
@@ -97,7 +97,7 @@ async function createConversation(req, res) {
 
       const conv = await pool.query('SELECT * FROM ops_conversations WHERE id = $1', [convId]);
       const members = await pool.query(
-        `SELECT u.id, u.name, u.role
+        `SELECT u.id, u.name, u.role, u.color
          FROM ops_conversation_members m
          JOIN ops_users u ON u.id = m.user_id
          WHERE m.conversation_id = $1`,
@@ -133,7 +133,7 @@ async function createConversation(req, res) {
       }
 
       const members = await pool.query(
-        `SELECT u.id, u.name, u.role
+        `SELECT u.id, u.name, u.role, u.color
          FROM ops_conversation_members m
          JOIN ops_users u ON u.id = m.user_id
          WHERE m.conversation_id = $1`,
@@ -170,8 +170,8 @@ async function getMessages(req, res) {
 
     let query = `
       SELECT msg.id, msg.conversation_id, msg.sender_id, msg.type, msg.content,
-             msg.task_id, msg.review_status, msg.created_at, msg.updated_at,
-             u.name AS sender_name
+             msg.task_id, msg.review_status, msg.pause_request_id, msg.idea_request_id,
+             msg.created_at, msg.updated_at, u.name AS sender_name
       FROM ops_messages msg
       JOIN ops_users u ON u.id = msg.sender_id
       WHERE msg.conversation_id = $1
@@ -197,7 +197,7 @@ async function getMessages(req, res) {
       if (msg.type === 'task_review' && msg.task_id) {
         const taskResult = await pool.query(
           `SELECT t.id, t.title, t.description, t.priority, t.status,
-                  t.date, t.column_group
+                  t.date, t.end_date, t.column_group, t.is_paused
            FROM ops_tasks t
            WHERE t.id = $1`,
           [msg.task_id]
@@ -206,11 +206,11 @@ async function getMessages(req, res) {
           const task = taskResult.rows[0];
           // Fetch assignees and reviewers
           const assignees = await pool.query(
-            `SELECT u.id, u.name FROM ops_task_assignees a JOIN ops_users u ON u.id = a.user_id WHERE a.task_id = $1`,
+            `SELECT u.id, u.name, u.color FROM ops_task_assignees a JOIN ops_users u ON u.id = a.user_id WHERE a.task_id = $1`,
             [msg.task_id]
           );
           const reviewers = await pool.query(
-            `SELECT u.id, u.name FROM ops_task_reviewers r JOIN ops_users u ON u.id = r.user_id WHERE r.task_id = $1`,
+            `SELECT u.id, u.name, u.color FROM ops_task_reviewers r JOIN ops_users u ON u.id = r.user_id WHERE r.task_id = $1`,
             [msg.task_id]
           );
           task.assignees = assignees.rows;
@@ -219,6 +219,30 @@ async function getMessages(req, res) {
         } else {
           msg.task = null;
         }
+      }
+
+      if (msg.type === 'pause_request' && msg.pause_request_id) {
+        const prResult = await pool.query(
+          `SELECT pr.id, pr.reason, pr.note, pr.status, pr.requested_by,
+                  t.title AS task_title
+           FROM ops_task_pause_requests pr
+           JOIN ops_tasks t ON t.id = pr.task_id
+           WHERE pr.id = $1`,
+          [msg.pause_request_id]
+        );
+        msg.pause_request = prResult.rows[0] || null;
+      }
+
+      if (msg.type === 'idea_request' && msg.idea_request_id) {
+        const irResult = await pool.query(
+          `SELECT ir.id, ir.reason, ir.status, ir.requested_by,
+                  t.title AS task_title
+           FROM ops_idea_requests ir
+           JOIN ops_tasks t ON t.id = ir.task_id
+           WHERE ir.id = $1`,
+          [msg.idea_request_id]
+        );
+        msg.idea_request = irResult.rows[0] || null;
       }
     }
 

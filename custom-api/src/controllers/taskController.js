@@ -29,7 +29,7 @@ async function replaceTaskTypes(taskId, typeIds) {
 
 async function fetchAssignees(taskId) {
   const result = await pool.query(
-    `SELECT u.id, u.name FROM ops_task_assignees a JOIN ops_users u ON u.id = a.user_id WHERE a.task_id = $1`,
+    `SELECT u.id, u.name, u.color FROM ops_task_assignees a JOIN ops_users u ON u.id = a.user_id WHERE a.task_id = $1`,
     [taskId]
   );
   return result.rows;
@@ -37,7 +37,7 @@ async function fetchAssignees(taskId) {
 
 async function fetchReviewers(taskId) {
   const result = await pool.query(
-    `SELECT u.id, u.name FROM ops_task_reviewers r JOIN ops_users u ON u.id = r.user_id WHERE r.task_id = $1`,
+    `SELECT u.id, u.name, u.color FROM ops_task_reviewers r JOIN ops_users u ON u.id = r.user_id WHERE r.task_id = $1`,
     [taskId]
   );
   return result.rows;
@@ -153,6 +153,17 @@ async function enrichTask(task, opts = {}) {
     task.days_inactive = h.days_inactive;
   }
 
+  // Attach pending pause request if one exists
+  const pauseReqResult = await pool.query(
+    `SELECT pr.id, pr.reason, pr.note, pr.created_at, u.name AS requested_by_name, pr.requested_by
+     FROM ops_task_pause_requests pr
+     JOIN ops_users u ON u.id = pr.requested_by
+     WHERE pr.task_id = $1 AND pr.status = 'pending'
+     LIMIT 1`,
+    [task.id]
+  );
+  task.pending_pause_request = pauseReqResult.rows[0] || null;
+
   return task;
 }
 
@@ -160,7 +171,7 @@ async function enrichTask(task, opts = {}) {
 
 async function listTasks(req, res) {
   try {
-    const { status, priority, person_id, reviewer_id, column_group, type_id } = req.query;
+    const { status, priority, person_id, reviewer_id, column_group, type_id, health, date_from, date_to } = req.query;
 
     let query = `
       SELECT DISTINCT t.id, t.title, t.description, t.status, t.priority,
@@ -195,6 +206,10 @@ async function listTasks(req, res) {
     if (priority) { params.push(priority); conditions.push(`t.priority = $${params.length}`); }
     if (column_group) { params.push(column_group); conditions.push(`t.column_group = $${params.length}`); }
 
+    // Date range filter — matches tasks whose date falls within the range
+    if (date_from) { params.push(date_from); conditions.push(`t.date >= $${params.length}`); }
+    if (date_to) { params.push(date_to); conditions.push(`t.date <= $${params.length}`); }
+
     if (conditions.length > 0) {
       query += ' WHERE ' + conditions.join(' AND ');
     }
@@ -206,6 +221,8 @@ async function listTasks(req, res) {
     const tasks = [];
     for (const task of result.rows) {
       await enrichTask(task);
+      // Health filter is post-enrichment since health is computed, not stored
+      if (health && task.health !== health) continue;
       tasks.push(task);
     }
 
@@ -248,7 +265,11 @@ async function createTask(req, res) {
 
     // Handle reviewers: accept reviewer_ids array or single reviewer_id
     const reviewers = Array.isArray(reviewer_ids) ? reviewer_ids : (reviewer_id ? [reviewer_id] : []);
-    if (reviewers.length > 0) await replaceReviewers(task.id, reviewers);
+    if (reviewers.length === 0) {
+      await pool.query('DELETE FROM ops_tasks WHERE id = $1', [task.id]);
+      return res.status(400).json({ error: 'At least one reviewer (captain) is required' });
+    }
+    await replaceReviewers(task.id, reviewers);
 
     if (Array.isArray(type_ids) && type_ids.length > 0) {
       await replaceTaskTypes(task.id, type_ids);
@@ -257,7 +278,8 @@ async function createTask(req, res) {
     await enrichTask(task);
     return res.status(201).json(task);
   } catch (err) {
-    return res.status(500).json({ error: 'Failed to create task' });
+    console.error('createTask error:', err);
+    return res.status(500).json({ error: 'Failed to create task', detail: err.message });
   }
 }
 
@@ -447,6 +469,16 @@ async function changeStatus(req, res) {
       }
     }
 
+    // Activity log
+    const statusLabels = {
+      not_completed: 'Not Completed',
+      reviewer: 'Submitted for Review',
+      completed: 'Completed',
+      idea: 'Moved to Ideas',
+      archived: 'Archived',
+    };
+    await logActivity(id, userId, `${req.user.name} changed status to "${statusLabels[status] || status}"`);
+
     await enrichTask(updated);
 
     // Emit real-time notification for status changes
@@ -469,6 +501,31 @@ async function changeStatus(req, res) {
 
 // ── Comments ────────────────────────────────────────────────────────────────
 
+async function logActivity(taskId, userId, text) {
+  await pool.query(
+    `INSERT INTO ops_task_comments (task_id, user_id, text, is_system) VALUES ($1, $2, $3, true)`,
+    [taskId, userId, text]
+  );
+}
+
+async function listComments(req, res) {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT c.id, c.task_id, c.user_id, c.text, c.is_system, c.created_at,
+              u.name AS user_name
+       FROM ops_task_comments c
+       JOIN ops_users u ON u.id = c.user_id
+       WHERE c.task_id = $1
+       ORDER BY c.created_at ASC`,
+      [id]
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+}
+
 async function addComment(req, res) {
   try {
     const { id } = req.params;
@@ -486,7 +543,7 @@ async function addComment(req, res) {
     const result = await pool.query(
       `INSERT INTO ops_task_comments (task_id, user_id, text)
        VALUES ($1, $2, $3)
-       RETURNING id, task_id, user_id, text, created_at`,
+       RETURNING id, task_id, user_id, text, is_system, created_at`,
       [id, req.user.id, text.trim()]
     );
 
@@ -575,49 +632,167 @@ async function pauseTask(req, res) {
     const userId = req.user.id;
     const assigneeIds = await getAssigneeIds(id);
 
-    // Auth: any assignee, admin, or super_admin
     if (!assigneeIds.includes(userId) && !['admin', 'super_admin'].includes(req.user.role)) {
-      return res.status(403).json({ error: 'Only an assigned person or admin can pause this task' });
+      return res.status(403).json({ error: 'Only an assigned person or admin can request a pause' });
     }
 
-    const pauseResult = await pool.query(
-      `INSERT INTO ops_task_pauses (task_id, paused_by, reason, note)
-       VALUES ($1, $2, $3, $4) RETURNING id, paused_at, reason, note`,
+    // Check no pending pause request already exists
+    const existing = await pool.query(
+      `SELECT id FROM ops_task_pause_requests WHERE task_id = $1 AND status = 'pending'`,
+      [id]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'A pause request is already pending for this task' });
+    }
+
+    // Create pause request
+    const result = await pool.query(
+      `INSERT INTO ops_task_pause_requests (task_id, requested_by, reason, note)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, task_id, status, reason, note, created_at`,
       [id, userId, reason, note || null]
     );
 
-    await pool.query('UPDATE ops_tasks SET is_paused = true WHERE id = $1', [id]);
+    // Activity log
+    const reasonText = reason.replace(/_/g, ' ');
+    await logActivity(id, userId, `${req.user.name} requested to pause — Reason: ${reasonText}${note ? '. Note: ' + note : ''}`);
 
-    // Notify all reviewers via chat
+    // Notify reviewers
+    const reviewerIds = await getReviewerIds(id);
+    emitToUsers(reviewerIds, 'notification', {
+      type: 'pause_request',
+      task_id: id,
+      task_title: task.title,
+      request_id: result.rows[0].id,
+      reason,
+      note: note || null,
+      requested_by: req.user.name,
+    });
+
+    // Send pause_request card to each reviewer's DM
     try {
-      const reviewerIds = await getReviewerIds(id);
-      const reasonText = reason.replace(/_/g, ' ');
-      const msg = `⏸ Task paused: "${task.title}" — Reason: ${reasonText}${note ? '. Note: ' + note : ''}`;
+      const msg = `⏸ Pause requested: "${task.title}" — Reason: ${reasonText}${note ? '. Note: ' + note : ''}`;
       for (const rId of reviewerIds) {
         const convId = await findOrCreateDirectConversation(userId, rId);
         await pool.query(
-          `INSERT INTO ops_messages (conversation_id, sender_id, type, content) VALUES ($1, $2, 'text', $3)`,
-          [convId, userId, msg]
+          `INSERT INTO ops_messages (conversation_id, sender_id, type, content, task_id, pause_request_id)
+           VALUES ($1, $2, 'pause_request', $3, $4, $5)`,
+          [convId, userId, msg, id, result.rows[0].id]
         );
       }
     } catch (chatErr) {
-      // Don't fail the pause if chat notification fails
+      // Don't fail the request if chat fails
     }
 
-    // Emit real-time notification
-    const reviewerIds = await getReviewerIds(id);
-    const notifyIds = [...new Set([...assigneeIds, ...reviewerIds])].filter(uid => uid !== userId);
-    emitToUsers(notifyIds, 'notification', {
-      type: 'task_paused',
-      task_id: id,
-      task_title: task.title,
-      reason,
-      paused_by: req.user.name,
+    return res.status(201).json(result.rows[0]);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to request pause' });
+  }
+}
+
+async function approvePauseRequest(req, res) {
+  try {
+    const { id } = req.params; // pause request id
+    const { status } = req.body;
+    const userId = req.user.id;
+
+    if (!status || !['approved', 'denied'].includes(status)) {
+      return res.status(400).json({ error: 'status must be approved or denied' });
+    }
+
+    const reqResult = await pool.query(
+      `SELECT pr.id, pr.task_id, pr.status, pr.requested_by, pr.reason, pr.note, t.title AS task_title
+       FROM ops_task_pause_requests pr
+       JOIN ops_tasks t ON t.id = pr.task_id
+       WHERE pr.id = $1`,
+      [id]
+    );
+    if (reqResult.rows.length === 0) return res.status(404).json({ error: 'Pause request not found' });
+
+    const pauseReq = reqResult.rows[0];
+    if (pauseReq.status !== 'pending') {
+      return res.status(400).json({ error: 'This request has already been reviewed' });
+    }
+
+    // Auth: task reviewer or admin/super_admin
+    const reviewerIds = await getReviewerIds(pauseReq.task_id);
+    if (!reviewerIds.includes(userId) && !['admin', 'super_admin'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Only a reviewer or admin can approve or deny a pause request' });
+    }
+
+    await pool.query(
+      `UPDATE ops_task_pause_requests SET status = $1, reviewed_by = $2, reviewed_at = NOW() WHERE id = $3`,
+      [status, userId, id]
+    );
+
+    if (status === 'approved') {
+      await pool.query(
+        `INSERT INTO ops_task_pauses (task_id, paused_by, reason, note) VALUES ($1, $2, $3, $4)`,
+        [pauseReq.task_id, pauseReq.requested_by, pauseReq.reason, pauseReq.note]
+      );
+      await pool.query('UPDATE ops_tasks SET is_paused = true WHERE id = $1', [pauseReq.task_id]);
+
+      const reasonText = pauseReq.reason.replace(/_/g, ' ');
+      await logActivity(pauseReq.task_id, userId, `${req.user.name} approved pause — task is now paused (Reason: ${reasonText})`);
+    } else {
+      await logActivity(pauseReq.task_id, userId, `${req.user.name} denied the pause request`);
+    }
+
+    // Send chat message to assignee↔reviewer conversation
+    try {
+      const reasonText = pauseReq.reason.replace(/_/g, ' ');
+      const chatMsg = status === 'approved'
+        ? `✅ Pause approved for "${pauseReq.task_title}" — Reason: ${reasonText}`
+        : `❌ Pause request denied for "${pauseReq.task_title}"`;
+
+      const convId = await findOrCreateDirectConversation(pauseReq.requested_by, userId);
+      await pool.query(
+        `INSERT INTO ops_messages (conversation_id, sender_id, type, content) VALUES ($1, $2, 'text', $3)`,
+        [convId, userId, chatMsg]
+      );
+    } catch (chatErr) {
+      // Don't fail the approval if chat fails
+    }
+
+    // Notify requester
+    emitToUsers([pauseReq.requested_by], 'notification', {
+      type: 'pause_request_reviewed',
+      task_id: pauseReq.task_id,
+      request_id: id,
+      status,
+      reviewed_by: req.user.name,
     });
 
-    return res.json({ message: 'Task paused', pause: pauseResult.rows[0] });
+    return res.json({ id, status, task_id: pauseReq.task_id, reviewed_by_name: req.user.name });
   } catch (err) {
-    return res.status(500).json({ error: 'Failed to pause task' });
+    return res.status(500).json({ error: 'Failed to review pause request' });
+  }
+}
+
+async function listPauseRequests(req, res) {
+  try {
+    const { status, task_id } = req.query;
+    const params = [];
+    const conditions = [];
+
+    if (status) { params.push(status); conditions.push(`pr.status = $${params.length}`); }
+    if (task_id) { params.push(task_id); conditions.push(`pr.task_id = $${params.length}`); }
+
+    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    const result = await pool.query(
+      `SELECT pr.id, pr.task_id, t.title AS task_title,
+              u.name AS requested_by_name, pr.status, pr.reason, pr.note, pr.created_at
+       FROM ops_task_pause_requests pr
+       JOIN ops_tasks t ON t.id = pr.task_id
+       JOIN ops_users u ON u.id = pr.requested_by
+       ${where}
+       ORDER BY pr.created_at DESC`,
+      params
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to list pause requests' });
   }
 }
 
@@ -633,17 +808,27 @@ async function resumeTask(req, res) {
 
     const userId = req.user.id;
     const assigneeIds = await getAssigneeIds(id);
+    const reviewerIds = await getReviewerIds(id);
 
-    if (!assigneeIds.includes(userId) && !['admin', 'super_admin'].includes(req.user.role)) {
-      return res.status(403).json({ error: 'Only an assigned person or admin can resume this task' });
+    // Assignees, reviewers, and admins can all resume
+    const canResume = assigneeIds.includes(userId) || reviewerIds.includes(userId) || ['admin', 'super_admin'].includes(req.user.role);
+    if (!canResume) {
+      return res.status(403).json({ error: 'Only an assignee, reviewer, or admin can resume this task' });
     }
 
     await pool.query(
       `UPDATE ops_task_pauses SET resumed_at = CURRENT_DATE WHERE task_id = $1 AND resumed_at IS NULL`,
       [id]
     );
-
     await pool.query('UPDATE ops_tasks SET is_paused = false WHERE id = $1', [id]);
+    await logActivity(id, userId, `${req.user.name} resumed the task`);
+
+    const notifyIds = [...new Set([...assigneeIds, ...reviewerIds])].filter(uid => uid !== userId);
+    emitToUsers(notifyIds, 'notification', {
+      type: 'task_resumed',
+      task_id: id,
+      resumed_by: req.user.name,
+    });
 
     return res.json({ message: 'Task resumed' });
   } catch (err) {
@@ -756,8 +941,8 @@ async function reorderTasks(req, res) {
 
 module.exports = {
   listTasks, createTask, getTask, updateTask, deleteTask,
-  changeStatus, addComment,
+  changeStatus, listComments, addComment,
   listTaskTypes, createTaskType, updateTaskType, deleteTaskType,
-  pauseTask, resumeTask, getTaskTime,
+  pauseTask, approvePauseRequest, listPauseRequests, resumeTask, getTaskTime,
   stagnantTasks, archiveTask, reorderTasks,
 };

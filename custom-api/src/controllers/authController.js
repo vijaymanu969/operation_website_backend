@@ -10,7 +10,7 @@ async function login(req, res) {
     }
 
     const result = await pool.query(
-      'SELECT id, name, email, password_hash, role FROM ops_users WHERE email = $1 AND is_active = true',
+      'SELECT id, name, email, password_hash, role, color FROM ops_users WHERE email = $1 AND is_active = true',
       [email]
     );
 
@@ -32,7 +32,7 @@ async function login(req, res) {
 
     return res.json({
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, color: user.color },
     });
   } catch (err) {
     return res.status(500).json({ error: 'Login failed' });
@@ -42,7 +42,7 @@ async function login(req, res) {
 async function getMe(req, res) {
   try {
     const userResult = await pool.query(
-      'SELECT id, name, email, role, is_active, created_at FROM ops_users WHERE id = $1',
+      'SELECT id, name, email, role, color, is_active, created_at FROM ops_users WHERE id = $1',
       [req.user.id]
     );
 

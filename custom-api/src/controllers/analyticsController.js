@@ -217,4 +217,135 @@ async function dashboard(req, res) {
   }
 }
 
-module.exports = { dashboard };
+async function taskPerformance(req, res) {
+  try {
+    const { user_id, start_date, end_date } = req.query;
+
+    // Build date filter
+    const dateConditions = [];
+    const params = [];
+
+    if (user_id) {
+      params.push(user_id);
+      dateConditions.push(`a.user_id = $${params.length}`);
+    }
+
+    if (start_date) {
+      params.push(start_date);
+      dateConditions.push(`t.completed_at >= $${params.length}`);
+    }
+
+    if (end_date) {
+      params.push(end_date);
+      dateConditions.push(`t.completed_at <= $${params.length}`);
+    }
+
+    // Only completed tasks with a start date (need date to compute drift)
+    dateConditions.push(`t.status = 'completed'`);
+    dateConditions.push(`t.completed_at IS NOT NULL`);
+    dateConditions.push(`t.date IS NOT NULL`);
+
+    const whereClause = dateConditions.length > 0 ? 'WHERE ' + dateConditions.join(' AND ') : '';
+
+    const tasksResult = await pool.query(
+      `SELECT DISTINCT t.id, t.title, t.date, t.end_date, t.completed_at,
+              a.user_id, u.name AS user_name
+       FROM ops_tasks t
+       JOIN ops_task_assignees a ON a.task_id = t.id
+       JOIN ops_users u ON u.id = a.user_id
+       ${whereClause}
+       ORDER BY t.completed_at DESC`,
+      params
+    );
+
+    // Group by user
+    const userMap = {};
+
+    for (const row of tasksResult.rows) {
+      // Get paused days for this task
+      const pauseRes = await pool.query(
+        `SELECT paused_at, resumed_at FROM ops_task_pauses WHERE task_id = $1`,
+        [row.id]
+      );
+      let paused_days = 0;
+      for (const p of pauseRes.rows) {
+        const s = new Date(p.paused_at);
+        const e = p.resumed_at ? new Date(p.resumed_at) : new Date();
+        paused_days += Math.max(0, Math.floor((e - s) / (1000 * 60 * 60 * 24)));
+      }
+
+      const actual_days = Math.floor((new Date(row.completed_at) - new Date(row.date)) / (1000 * 60 * 60 * 24)) - paused_days;
+      const planned_days = row.end_date
+        ? Math.floor((new Date(row.end_date) - new Date(row.date)) / (1000 * 60 * 60 * 24))
+        : null;
+      const drift = planned_days !== null ? actual_days - planned_days : null;
+
+      if (!userMap[row.user_id]) {
+        userMap[row.user_id] = {
+          user_id: row.user_id,
+          user_name: row.user_name,
+          tasks: [],
+        };
+      }
+
+      userMap[row.user_id].tasks.push({
+        task_id: row.id,
+        title: row.title,
+        date: row.date,
+        end_date: row.end_date,
+        completed_at: row.completed_at,
+        planned_days,
+        paused_days,
+        actual_days,
+        drift,
+      });
+    }
+
+    // Compute summary per user
+    const result = Object.values(userMap).map(u => {
+      const tasks = u.tasks;
+      const total_completed = tasks.length;
+      const avg_actual_days = total_completed > 0
+        ? Math.round((tasks.reduce((s, t) => s + t.actual_days, 0) / total_completed) * 10) / 10
+        : 0;
+
+      const tasksWithPlan = tasks.filter(t => t.drift !== null);
+      const avg_planned_days = tasksWithPlan.length > 0
+        ? Math.round((tasksWithPlan.reduce((s, t) => s + t.planned_days, 0) / tasksWithPlan.length) * 10) / 10
+        : null;
+      const avg_drift = tasksWithPlan.length > 0
+        ? Math.round((tasksWithPlan.reduce((s, t) => s + t.drift, 0) / tasksWithPlan.length) * 10) / 10
+        : null;
+      const on_time = tasksWithPlan.filter(t => t.drift <= 0).length;
+      const late = tasksWithPlan.filter(t => t.drift > 0).length;
+      const early = tasksWithPlan.filter(t => t.drift < 0).length;
+
+      return {
+        user_id: u.user_id,
+        user_name: u.user_name,
+        summary: {
+          total_completed,
+          avg_actual_days,
+          avg_planned_days,
+          avg_drift,
+          on_time,
+          late,
+          early,
+        },
+        tasks,
+      };
+    });
+
+    // If filtering by single user, return that user's object directly
+    if (user_id) {
+      return res.json(result[0] || null);
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error('taskPerformance error:', err);
+    return res.status(500).json({ error: 'Failed to compute task performance' });
+  }
+}
+
+module.exports = { dashboard, taskPerformance };

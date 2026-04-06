@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { emitToUsers } = require('../socket');
+const { findOrCreateDirectConversation } = require('../helpers/chatHelpers');
 
 // --- Request Idea Move ---
 async function requestIdeaMove(req, res) {
@@ -67,7 +68,7 @@ async function requestIdeaMove(req, res) {
     request.moves_used_this_month = movesUsed;
     request.moves_remaining = 3 - movesUsed;
 
-    // Notify reviewers about new idea request
+    // Notify reviewers and send idea_request card into each DM
     const reviewerResult = await pool.query(
       'SELECT user_id FROM ops_task_reviewers WHERE task_id = $1', [id]
     );
@@ -79,6 +80,22 @@ async function requestIdeaMove(req, res) {
       reason: reason.trim(),
       requested_by: req.user.name,
     });
+
+    try {
+      const taskResult = await pool.query('SELECT title FROM ops_tasks WHERE id = $1', [id]);
+      const taskTitle = taskResult.rows[0]?.title || '';
+      const msg = `💡 Idea move requested: "${taskTitle}" — Reason: ${reason.trim()}`;
+      for (const rId of reviewerIds) {
+        const convId = await findOrCreateDirectConversation(userId, rId);
+        await pool.query(
+          `INSERT INTO ops_messages (conversation_id, sender_id, type, content, task_id, idea_request_id)
+           VALUES ($1, $2, 'idea_request', $3, $4, $5)`,
+          [convId, userId, msg, id, request.id]
+        );
+      }
+    } catch (chatErr) {
+      // Don't fail the request if chat fails
+    }
 
     return res.status(201).json(request);
   } catch (err) {
@@ -99,8 +116,9 @@ async function reviewIdeaRequest(req, res) {
 
     // Fetch idea request
     const reqResult = await pool.query(
-      `SELECT ir.id, ir.task_id, ir.status, ir.requested_by
+      `SELECT ir.id, ir.task_id, ir.status, ir.requested_by, t.title AS task_title
        FROM ops_idea_requests ir
+       JOIN ops_tasks t ON t.id = ir.task_id
        WHERE ir.id = $1`,
       [id]
     );
@@ -139,6 +157,20 @@ async function reviewIdeaRequest(req, res) {
 
     // Get reviewer name
     const reviewerName = req.user.name;
+
+    // Send result message into chat
+    try {
+      const chatMsg = status === 'approved'
+        ? `✅ Idea move approved for "${ideaReq.task_title}" — task moved to Ideas`
+        : `❌ Idea move denied for "${ideaReq.task_title}"`;
+      const convId = await findOrCreateDirectConversation(ideaReq.requested_by, userId);
+      await pool.query(
+        `INSERT INTO ops_messages (conversation_id, sender_id, type, content) VALUES ($1, $2, 'text', $3)`,
+        [convId, userId, chatMsg]
+      );
+    } catch (chatErr) {
+      // Don't fail the review if chat fails
+    }
 
     // Notify the requester
     emitToUsers([ideaReq.requested_by], 'notification', {

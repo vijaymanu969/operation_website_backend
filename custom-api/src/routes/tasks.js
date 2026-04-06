@@ -27,12 +27,17 @@ router.get('/:id', requirePageAccess('tasks', 'view'), taskController.getTask);
 router.put('/:id', requirePageAccess('tasks', 'edit'), taskController.updateTask);
 router.delete('/:id', requirePageAccess('tasks', 'edit'), taskController.deleteTask);
 router.put('/:id/status', requirePageAccess('tasks', 'view'), taskController.changeStatus);
+router.get('/:id/comments', requirePageAccess('tasks', 'view'), taskController.listComments);
 router.post('/:id/comments', requirePageAccess('tasks', 'view'), taskController.addComment);
 
 // Pause / Resume / Time
 router.put('/:id/pause', requirePageAccess('tasks', 'view'), taskController.pauseTask);
 router.put('/:id/resume', requirePageAccess('tasks', 'view'), taskController.resumeTask);
 router.get('/:id/time', requirePageAccess('tasks', 'view'), taskController.getTaskTime);
+
+// Pause requests (reviewer approval flow)
+router.get('/pause-requests', requirePageAccess('tasks', 'view'), taskController.listPauseRequests);
+router.put('/pause-requests/:id', requirePageAccess('tasks', 'view'), taskController.approvePauseRequest);
 
 // Archive
 router.put('/:id/archive', requireRole('admin', 'super_admin'), taskController.archiveTask);

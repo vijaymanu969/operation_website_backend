@@ -3,10 +3,26 @@ const pool = require('../db');
 
 const ADMIN_MANAGED_ROLES = ['worker', 'intern'];
 
+// Minimal user directory for any authenticated user (person/reviewer pickers, @mentions, chat)
+// Returns only id, name, color, role — no emails, no activity info, no permissions
+async function directory(req, res) {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, color, role
+       FROM ops_users
+       WHERE is_active = true
+       ORDER BY name ASC`
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch user directory' });
+  }
+}
+
 async function listUsers(req, res) {
   try {
     const { role, is_active } = req.query;
-    let query = 'SELECT id, name, email, role, is_active, created_at, updated_at FROM ops_users WHERE 1=1';
+    let query = 'SELECT id, name, email, role, color, is_active, created_at, updated_at FROM ops_users WHERE 1=1';
     const params = [];
 
     // admin can only see workers and interns
@@ -35,7 +51,7 @@ async function listUsers(req, res) {
 
 async function createUser(req, res) {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, color } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email, and password are required' });
     }
@@ -49,10 +65,10 @@ async function createUser(req, res) {
 
     const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO ops_users (name, email, password_hash, role)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, name, email, role, is_active, created_at`,
-      [name, email, hash, userRole]
+      `INSERT INTO ops_users (name, email, password_hash, role, color)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, email, role, color, is_active, created_at`,
+      [name, email, hash, userRole, color || 'gray']
     );
 
     return res.status(201).json(result.rows[0]);
@@ -69,7 +85,7 @@ async function getUser(req, res) {
     const { id } = req.params;
 
     const userResult = await pool.query(
-      'SELECT id, name, email, role, is_active, created_at, updated_at FROM ops_users WHERE id = $1',
+      'SELECT id, name, email, role, color, is_active, created_at, updated_at FROM ops_users WHERE id = $1',
       [id]
     );
 
@@ -99,7 +115,7 @@ async function getUser(req, res) {
 async function updateUser(req, res) {
   try {
     const { id } = req.params;
-    const { name, email, role, is_active } = req.body;
+    const { name, email, role, is_active, color } = req.body;
 
     // Fetch target user
     const existing = await pool.query('SELECT role FROM ops_users WHERE id = $1', [id]);
@@ -129,6 +145,7 @@ async function updateUser(req, res) {
     if (email !== undefined) { params.push(email); fields.push(`email = $${params.length}`); }
     if (role !== undefined) { params.push(role); fields.push(`role = $${params.length}`); }
     if (is_active !== undefined) { params.push(is_active); fields.push(`is_active = $${params.length}`); }
+    if (color !== undefined) { params.push(color); fields.push(`color = $${params.length}`); }
 
     if (fields.length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
@@ -137,7 +154,7 @@ async function updateUser(req, res) {
     params.push(id);
     const result = await pool.query(
       `UPDATE ops_users SET ${fields.join(', ')} WHERE id = $${params.length}
-       RETURNING id, name, email, role, is_active, created_at, updated_at`,
+       RETURNING id, name, email, role, color, is_active, created_at, updated_at`,
       params
     );
 
@@ -244,4 +261,4 @@ async function setAccess(req, res) {
   }
 }
 
-module.exports = { listUsers, createUser, getUser, updateUser, deleteUser, getAccess, setAccess };
+module.exports = { directory, listUsers, createUser, getUser, updateUser, deleteUser, getAccess, setAccess };

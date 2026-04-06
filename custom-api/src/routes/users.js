@@ -6,6 +6,9 @@ const userController = require('../controllers/userController');
 
 router.use(verifyGoTrueJWT);
 
+// Directory: minimal list for any authenticated user (used for person/reviewer pickers, @mentions, chat)
+router.get('/directory', userController.directory);
+
 router.get('/', requireRole('super_admin', 'admin'), userController.listUsers);
 router.post('/', requireRole('super_admin', 'admin'), userController.createUser);
 router.get('/:id', requireRole('super_admin', 'admin'), userController.getUser);
