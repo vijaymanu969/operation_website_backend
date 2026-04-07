@@ -8,5 +8,6 @@ router.use(verifyGoTrueJWT);
 
 router.get('/dashboard', requireRole('admin', 'super_admin'), analyticsController.dashboard);
 router.get('/tasks/performance', requireRole('admin', 'super_admin'), analyticsController.taskPerformance);
+router.get('/users/:id/summary', analyticsController.userSummary);
 
 module.exports = router;

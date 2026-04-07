@@ -3,6 +3,12 @@ const pool = require('../db');
 
 const ADMIN_MANAGED_ROLES = ['worker', 'intern'];
 
+// Soothing palette for auto-assigned user colors
+const USER_COLORS = ['blue', 'purple', 'green', 'orange', 'pink', 'teal', 'indigo', 'rose'];
+function randomColor() {
+  return USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)];
+}
+
 // Minimal user directory for any authenticated user (person/reviewer pickers, @mentions, chat)
 // Returns only id, name, color, role — no emails, no activity info, no permissions
 async function directory(req, res) {
@@ -68,7 +74,7 @@ async function createUser(req, res) {
       `INSERT INTO ops_users (name, email, password_hash, role, color)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, name, email, role, color, is_active, created_at`,
-      [name, email, hash, userRole, color || 'gray']
+      [name, email, hash, userRole, color || randomColor()]
     );
 
     return res.status(201).json(result.rows[0]);

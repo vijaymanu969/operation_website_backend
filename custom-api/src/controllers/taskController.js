@@ -184,6 +184,19 @@ async function listTasks(req, res) {
     const conditions = [];
     const params = [];
 
+    // Non-admin roles only see tasks they are assigned to or reviewing
+    const isAdmin = ['admin', 'super_admin'].includes(req.user.role);
+    if (!isAdmin) {
+      query += `
+        JOIN (
+          SELECT task_id FROM ops_task_assignees WHERE user_id = $1
+          UNION
+          SELECT task_id FROM ops_task_reviewers WHERE user_id = $1
+        ) visible ON visible.task_id = t.id
+      `;
+      params.push(req.user.id);
+    }
+
     if (type_id) {
       query += ' JOIN ops_task_type_assignments ta ON ta.task_id = t.id';
       params.push(type_id);
@@ -327,10 +340,15 @@ async function updateTask(req, res) {
     const { title, description, priority, date, end_date, column_group, sort_order,
             person_ids, reviewer_ids, person_id, reviewer_id, type_ids } = req.body;
 
-    const existing = await pool.query('SELECT id FROM ops_tasks WHERE id = $1', [id]);
-    if (existing.rows.length === 0) {
+    // Snapshot before changes for diffing
+    const beforeRes = await pool.query('SELECT * FROM ops_tasks WHERE id = $1', [id]);
+    if (beforeRes.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found' });
     }
+    const before = beforeRes.rows[0];
+    const beforeAssignees = await fetchAssignees(id);
+    const beforeReviewers = await fetchReviewers(id);
+    const beforeTypes = await fetchTaskTypes(id);
 
     const fields = [];
     const params = [];
@@ -352,25 +370,82 @@ async function updateTask(req, res) {
       );
       task = result.rows[0];
     } else {
-      const r = await pool.query('SELECT * FROM ops_tasks WHERE id = $1', [id]);
-      task = r.rows[0];
+      task = before;
     }
 
     // Update assignees
-    const assignees = Array.isArray(person_ids) ? person_ids : (person_id ? [person_id] : null);
-    if (assignees) await replaceAssignees(id, assignees);
+    const assigneesNew = Array.isArray(person_ids) ? person_ids : (person_id ? [person_id] : null);
+    if (assigneesNew) await replaceAssignees(id, assigneesNew);
 
     // Update reviewers
-    const reviewers = Array.isArray(reviewer_ids) ? reviewer_ids : (reviewer_id ? [reviewer_id] : null);
-    if (reviewers) await replaceReviewers(id, reviewers);
+    const reviewersNew = Array.isArray(reviewer_ids) ? reviewer_ids : (reviewer_id ? [reviewer_id] : null);
+    if (reviewersNew) await replaceReviewers(id, reviewersNew);
 
     if (Array.isArray(type_ids)) {
       await replaceTaskTypes(id, type_ids);
     }
 
+    // Activity log — diff and write entries for every meaningful change
+    const userName = req.user.name;
+    const fmtDate = v => v ? new Date(v).toISOString().split('T')[0] : 'none';
+
+    if (title !== undefined && title !== before.title) {
+      await logActivity(id, req.user.id, `${userName} changed title from "${before.title}" to "${title}"`);
+    }
+    if (description !== undefined && description !== before.description) {
+      await logActivity(id, req.user.id, `${userName} updated the description`);
+    }
+    if (priority !== undefined && priority !== before.priority) {
+      await logActivity(id, req.user.id, `${userName} changed priority from ${before.priority} to ${priority}`);
+    }
+    if (date !== undefined && fmtDate(date) !== fmtDate(before.date)) {
+      await logActivity(id, req.user.id, `${userName} changed start date from ${fmtDate(before.date)} to ${fmtDate(date)}`);
+    }
+    if (end_date !== undefined && fmtDate(end_date) !== fmtDate(before.end_date)) {
+      await logActivity(id, req.user.id, `${userName} changed deadline from ${fmtDate(before.end_date)} to ${fmtDate(end_date)}`);
+    }
+    if (column_group !== undefined && column_group !== before.column_group) {
+      await logActivity(id, req.user.id, `${userName} moved task from "${before.column_group}" to "${column_group}"`);
+    }
+
+    if (assigneesNew) {
+      const beforeIds = beforeAssignees.map(a => a.id).sort().join(',');
+      const afterIds = [...assigneesNew].sort().join(',');
+      if (beforeIds !== afterIds) {
+        const newNames = await pool.query(`SELECT name FROM ops_users WHERE id = ANY($1)`, [assigneesNew]);
+        const oldList = beforeAssignees.map(a => a.name).join(', ') || 'none';
+        const newList = newNames.rows.map(r => r.name).join(', ') || 'none';
+        await logActivity(id, req.user.id, `${userName} changed assignees from [${oldList}] to [${newList}]`);
+      }
+    }
+
+    if (reviewersNew) {
+      const beforeIds = beforeReviewers.map(r => r.id).sort().join(',');
+      const afterIds = [...reviewersNew].sort().join(',');
+      if (beforeIds !== afterIds) {
+        const newNames = await pool.query(`SELECT name FROM ops_users WHERE id = ANY($1)`, [reviewersNew]);
+        const oldList = beforeReviewers.map(r => r.name).join(', ') || 'none';
+        const newList = newNames.rows.map(r => r.name).join(', ') || 'none';
+        await logActivity(id, req.user.id, `${userName} changed reviewers from [${oldList}] to [${newList}]`);
+      }
+    }
+
+    if (Array.isArray(type_ids)) {
+      const beforeIds = beforeTypes.map(t => t.id).sort().join(',');
+      const afterIds = [...type_ids].sort().join(',');
+      if (beforeIds !== afterIds) {
+        const newNames = type_ids.length > 0
+          ? (await pool.query(`SELECT name FROM ops_task_types WHERE id = ANY($1)`, [type_ids])).rows.map(r => r.name).join(', ')
+          : 'none';
+        const oldList = beforeTypes.map(t => t.name).join(', ') || 'none';
+        await logActivity(id, req.user.id, `${userName} changed types from [${oldList}] to [${newNames}]`);
+      }
+    }
+
     await enrichTask(task);
     return res.json(task);
   } catch (err) {
+    console.error('updateTask error:', err);
     return res.status(500).json({ error: 'Failed to update task' });
   }
 }
@@ -391,6 +466,25 @@ async function deleteTask(req, res) {
     return res.json({ message: 'Task deleted', task: result.rows[0] });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to delete task' });
+  }
+}
+
+async function bulkDeleteTasks(req, res) {
+  try {
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids must be a non-empty array of task UUIDs' });
+    }
+
+    const result = await pool.query(
+      `DELETE FROM ops_tasks WHERE id = ANY($1) RETURNING id, title`,
+      [ids]
+    );
+
+    return res.json({ deleted: result.rows.length, tasks: result.rows });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete tasks' });
   }
 }
 
@@ -940,7 +1034,7 @@ async function reorderTasks(req, res) {
 }
 
 module.exports = {
-  listTasks, createTask, getTask, updateTask, deleteTask,
+  listTasks, createTask, getTask, updateTask, deleteTask, bulkDeleteTasks,
   changeStatus, listComments, addComment,
   listTaskTypes, createTaskType, updateTaskType, deleteTaskType,
   pauseTask, approvePauseRequest, listPauseRequests, resumeTask, getTaskTime,

@@ -348,4 +348,132 @@ async function taskPerformance(req, res) {
   }
 }
 
-module.exports = { dashboard, taskPerformance };
+async function userSummary(req, res) {
+  try {
+    const { id } = req.params;
+
+    // Workers and interns can only see their own summary
+    const isAdmin = ['admin', 'super_admin'].includes(req.user.role);
+    if (!isAdmin && req.user.id !== id) {
+      return res.status(403).json({ error: 'You can only view your own summary' });
+    }
+
+    const userResult = await pool.query('SELECT id, name, role FROM ops_users WHERE id = $1', [id]);
+    if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = userResult.rows[0];
+
+    // All tasks assigned to this user
+    const tasksResult = await pool.query(
+      `SELECT t.id, t.title, t.status, t.is_paused, t.date, t.end_date, t.completed_at, t.created_at
+       FROM ops_tasks t
+       JOIN ops_task_assignees a ON a.task_id = t.id
+       WHERE a.user_id = $1`,
+      [id]
+    );
+    const allTasks = tasksResult.rows;
+
+    // Workload counts
+    const workload = { total_assigned: allTasks.length, not_completed: 0, in_review: 0, completed: 0, paused: 0, idea: 0, archived: 0 };
+    for (const t of allTasks) {
+      if (t.status === 'not_completed') workload.not_completed++;
+      else if (t.status === 'reviewer') workload.in_review++;
+      else if (t.status === 'completed') workload.completed++;
+      else if (t.status === 'idea') workload.idea++;
+      else if (t.status === 'archived') workload.archived++;
+      if (t.is_paused) workload.paused++;
+    }
+
+    // Completion rate
+    const completion_rate = allTasks.length > 0
+      ? Math.round((workload.completed / allTasks.length) * 1000) / 10
+      : 0;
+
+    // Health breakdown — active not_completed tasks only
+    const health_breakdown = { active: 0, at_risk: 0, stagnant: 0, dead: 0 };
+    for (const t of allTasks.filter(t => t.status === 'not_completed' && !t.is_paused)) {
+      const actResult = await pool.query(
+        `SELECT MAX(ts) AS last_activity FROM (
+           SELECT MAX(created_at) AS ts FROM ops_task_pauses WHERE task_id = $1
+           UNION ALL
+           SELECT MAX(created_at) AS ts FROM ops_task_comments WHERE task_id = $1
+         ) sub`,
+        [t.id]
+      );
+      const lastActivity = actResult.rows[0]?.last_activity || t.created_at;
+      const days = Math.floor((new Date() - new Date(lastActivity)) / (1000 * 60 * 60 * 24));
+      if (days >= 14) health_breakdown.dead++;
+      else if (days >= 7) health_breakdown.stagnant++;
+      else if (days >= 3) health_breakdown.at_risk++;
+      else health_breakdown.active++;
+    }
+
+    // Performance — completed tasks with start date
+    const completedWithDate = allTasks.filter(t => t.status === 'completed' && t.completed_at && t.date);
+    const perfTasks = [];
+    for (const t of completedWithDate) {
+      const pauseRes = await pool.query(
+        `SELECT paused_at, resumed_at FROM ops_task_pauses WHERE task_id = $1`, [t.id]
+      );
+      let paused_days = 0;
+      for (const p of pauseRes.rows) {
+        const s = new Date(p.paused_at);
+        const e = p.resumed_at ? new Date(p.resumed_at) : new Date();
+        paused_days += Math.max(0, Math.floor((e - s) / (1000 * 60 * 60 * 24)));
+      }
+      const actual_days = Math.floor((new Date(t.completed_at) - new Date(t.date)) / (1000 * 60 * 60 * 24)) - paused_days;
+      const planned_days = t.end_date
+        ? Math.floor((new Date(t.end_date) - new Date(t.date)) / (1000 * 60 * 60 * 24))
+        : null;
+      const drift = planned_days !== null ? actual_days - planned_days : null;
+      perfTasks.push({ task_id: t.id, title: t.title, planned_days, paused_days, actual_days, drift, completed_at: t.completed_at, end_date: t.end_date });
+    }
+
+    const tasksWithPlan = perfTasks.filter(t => t.drift !== null);
+    const performance = {
+      total_completed: perfTasks.length,
+      avg_actual_days: perfTasks.length > 0
+        ? Math.round((perfTasks.reduce((s, t) => s + t.actual_days, 0) / perfTasks.length) * 10) / 10
+        : null,
+      avg_planned_days: tasksWithPlan.length > 0
+        ? Math.round((tasksWithPlan.reduce((s, t) => s + t.planned_days, 0) / tasksWithPlan.length) * 10) / 10
+        : null,
+      avg_drift: tasksWithPlan.length > 0
+        ? Math.round((tasksWithPlan.reduce((s, t) => s + t.drift, 0) / tasksWithPlan.length) * 10) / 10
+        : null,
+      on_time: tasksWithPlan.filter(t => t.drift <= 0).length,
+      late: tasksWithPlan.filter(t => t.drift > 0).length,
+      early: tasksWithPlan.filter(t => t.drift < 0).length,
+    };
+
+    // Pause count this month
+    const monthStart = new Date();
+    monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const pauseCountResult = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM ops_task_pauses WHERE paused_by = $1 AND paused_at >= $2`,
+      [id, monthStart.toISOString().split('T')[0]]
+    );
+
+    // Recent completed (last 5, sorted by completed_at)
+    const recent_completed = perfTasks
+      .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at))
+      .slice(0, 5)
+      .map(t => ({ task_id: t.task_id, title: t.title, completed_at: t.completed_at, actual_days: t.actual_days, planned_days: t.planned_days, paused_days: t.paused_days, drift: t.drift }));
+
+    return res.json({
+      user_id: user.id,
+      user_name: user.name,
+      role: user.role,
+      workload,
+      health_breakdown,
+      completion_rate,
+      performance,
+      pause_count_this_month: pauseCountResult.rows[0].cnt,
+      recent_completed,
+    });
+  } catch (err) {
+    console.error('userSummary error:', err);
+    return res.status(500).json({ error: 'Failed to generate user summary' });
+  }
+}
+
+module.exports = { dashboard, taskPerformance, userSummary };

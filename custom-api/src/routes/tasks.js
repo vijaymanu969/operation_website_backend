@@ -25,6 +25,7 @@ router.get('/', requirePageAccess('tasks', 'view'), taskController.listTasks);
 router.post('/', requirePageAccess('tasks', 'edit'), taskController.createTask);
 router.get('/:id', requirePageAccess('tasks', 'view'), taskController.getTask);
 router.put('/:id', requirePageAccess('tasks', 'edit'), taskController.updateTask);
+router.delete('/', requirePageAccess('tasks', 'edit'), taskController.bulkDeleteTasks);
 router.delete('/:id', requirePageAccess('tasks', 'edit'), taskController.deleteTask);
 router.put('/:id/status', requirePageAccess('tasks', 'view'), taskController.changeStatus);
 router.get('/:id/comments', requirePageAccess('tasks', 'view'), taskController.listComments);
