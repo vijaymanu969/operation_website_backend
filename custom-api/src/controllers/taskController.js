@@ -169,12 +169,40 @@ async function enrichTask(task, opts = {}) {
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
 
+// Normalize a query param into an array of non-empty strings.
+// Accepts: undefined, single string, comma-separated string, or array (?foo=a&foo=b).
+function toArray(val) {
+  if (val === undefined || val === null || val === '') return [];
+  if (Array.isArray(val)) {
+    return val.flatMap((v) => String(v).split(',')).map((s) => s.trim()).filter(Boolean);
+  }
+  return String(val).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 async function listTasks(req, res) {
   try {
-    const { status, priority, person_id, reviewer_id, column_group, type_id, health, date_from, date_to } = req.query;
+    const {
+      status, priority, person_id, reviewer_id, column_group, type_id, health,
+      person_ids, reviewer_ids, type_ids, statuses, priorities, column_groups, healths,
+      date_from, date_to,
+      created_by, created_bys,
+      match = 'any', // 'any' (OR) | 'all' (AND) — applies to person/reviewer/type multi-filters
+    } = req.query;
+
+    // Merge singular + plural variants into arrays
+    const personIds   = [...toArray(person_id),   ...toArray(person_ids)];
+    const reviewerIds = [...toArray(reviewer_id), ...toArray(reviewer_ids)];
+    const typeIds     = [...toArray(type_id),     ...toArray(type_ids)];
+    const statusList   = [...toArray(status),   ...toArray(statuses)];
+    const priorityList = [...toArray(priority), ...toArray(priorities)];
+    const columnList   = [...toArray(column_group), ...toArray(column_groups)];
+    const healthList   = [...toArray(health),   ...toArray(healths)];
+    const createdByList = [...toArray(created_by), ...toArray(created_bys)];
+
+    const useAll = String(match).toLowerCase() === 'all';
 
     let query = `
-      SELECT DISTINCT t.id, t.title, t.description, t.status, t.priority,
+      SELECT t.id, t.title, t.description, t.status, t.priority,
              t.date, t.end_date, t.created_by,
              t.column_group, t.sort_order, t.is_paused, t.completed_at, t.date_set_by,
              t.created_at, t.updated_at
@@ -187,41 +215,60 @@ async function listTasks(req, res) {
     // Non-admin roles only see tasks they are assigned to or reviewing
     const isAdmin = ['admin', 'super_admin'].includes(req.user.role);
     if (!isAdmin) {
-      query += `
-        JOIN (
-          SELECT task_id FROM ops_task_assignees WHERE user_id = $1
-          UNION
-          SELECT task_id FROM ops_task_reviewers WHERE user_id = $1
-        ) visible ON visible.task_id = t.id
-      `;
       params.push(req.user.id);
+      conditions.push(`(
+        EXISTS (SELECT 1 FROM ops_task_assignees WHERE task_id = t.id AND user_id = $${params.length})
+        OR EXISTS (SELECT 1 FROM ops_task_reviewers WHERE task_id = t.id AND user_id = $${params.length})
+      )`);
     }
 
-    if (type_id) {
-      query += ' JOIN ops_task_type_assignments ta ON ta.task_id = t.id';
-      params.push(type_id);
-      conditions.push(`ta.type_id = $${params.length}`);
+    // Multi-value person filter via EXISTS + ANY (avoids duplicate rows, no DISTINCT needed)
+    if (personIds.length > 0) {
+      if (useAll) {
+        // Task must have ALL listed people as assignees
+        for (const pid of personIds) {
+          params.push(pid);
+          conditions.push(`EXISTS (SELECT 1 FROM ops_task_assignees WHERE task_id = t.id AND user_id = $${params.length})`);
+        }
+      } else {
+        params.push(personIds);
+        conditions.push(`EXISTS (SELECT 1 FROM ops_task_assignees WHERE task_id = t.id AND user_id = ANY($${params.length}::uuid[]))`);
+      }
     }
 
-    if (person_id) {
-      query += ' JOIN ops_task_assignees asgn ON asgn.task_id = t.id';
-      params.push(person_id);
-      conditions.push(`asgn.user_id = $${params.length}`);
+    if (reviewerIds.length > 0) {
+      if (useAll) {
+        for (const rid of reviewerIds) {
+          params.push(rid);
+          conditions.push(`EXISTS (SELECT 1 FROM ops_task_reviewers WHERE task_id = t.id AND user_id = $${params.length})`);
+        }
+      } else {
+        params.push(reviewerIds);
+        conditions.push(`EXISTS (SELECT 1 FROM ops_task_reviewers WHERE task_id = t.id AND user_id = ANY($${params.length}::uuid[]))`);
+      }
     }
 
-    if (reviewer_id) {
-      query += ' JOIN ops_task_reviewers rev ON rev.task_id = t.id';
-      params.push(reviewer_id);
-      conditions.push(`rev.user_id = $${params.length}`);
+    if (typeIds.length > 0) {
+      if (useAll) {
+        for (const tid of typeIds) {
+          params.push(tid);
+          conditions.push(`EXISTS (SELECT 1 FROM ops_task_type_assignments WHERE task_id = t.id AND type_id = $${params.length})`);
+        }
+      } else {
+        params.push(typeIds);
+        conditions.push(`EXISTS (SELECT 1 FROM ops_task_type_assignments WHERE task_id = t.id AND type_id = ANY($${params.length}::uuid[]))`);
+      }
     }
 
-    if (status) { params.push(status); conditions.push(`t.status = $${params.length}`); }
-    if (priority) { params.push(priority); conditions.push(`t.priority = $${params.length}`); }
-    if (column_group) { params.push(column_group); conditions.push(`t.column_group = $${params.length}`); }
+    // Simple column filters — multi-value becomes OR (IN list)
+    if (statusList.length > 0)   { params.push(statusList);   conditions.push(`t.status = ANY($${params.length}::text[])`); }
+    if (priorityList.length > 0) { params.push(priorityList); conditions.push(`t.priority = ANY($${params.length}::text[])`); }
+    if (columnList.length > 0)   { params.push(columnList);   conditions.push(`t.column_group = ANY($${params.length}::text[])`); }
+    if (createdByList.length > 0){ params.push(createdByList);conditions.push(`t.created_by = ANY($${params.length}::uuid[])`); }
 
-    // Date range filter — matches tasks whose date falls within the range
+    // Date range filter
     if (date_from) { params.push(date_from); conditions.push(`t.date >= $${params.length}`); }
-    if (date_to) { params.push(date_to); conditions.push(`t.date <= $${params.length}`); }
+    if (date_to)   { params.push(date_to);   conditions.push(`t.date <= $${params.length}`); }
 
     if (conditions.length > 0) {
       query += ' WHERE ' + conditions.join(' AND ');
@@ -235,13 +282,14 @@ async function listTasks(req, res) {
     for (const task of result.rows) {
       await enrichTask(task);
       // Health filter is post-enrichment since health is computed, not stored
-      if (health && task.health !== health) continue;
+      if (healthList.length > 0 && !healthList.includes(task.health)) continue;
       tasks.push(task);
     }
 
     return res.json(tasks);
   } catch (err) {
-    return res.status(500).json({ error: 'Failed to list tasks' });
+    console.error('listTasks error:', err);
+    return res.status(500).json({ error: 'Failed to list tasks', detail: err.message });
   }
 }
 

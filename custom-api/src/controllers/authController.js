@@ -30,8 +30,15 @@ async function login(req, res) {
       { expiresIn: '24h' }
     );
 
+    res.cookie('auth_token', token, {
+      httpOnly: true,
+      secure: false,
+      sameSite: false,
+      maxAge: 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
     return res.json({
-      token,
       user: { id: user.id, name: user.name, email: user.email, role: user.role, color: user.color },
     });
   } catch (err) {
@@ -101,4 +108,14 @@ async function changePassword(req, res) {
   }
 }
 
-module.exports = { login, getMe, changePassword };
+async function logout(req, res) {
+  res.clearCookie('auth_token', {
+    httpOnly: true,
+    secure: false,
+    sameSite: false,
+    path: '/',
+  });
+  return res.json({ message: 'Logged out' });
+}
+
+module.exports = { login, logout, getMe, changePassword };

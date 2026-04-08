@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const http = require('http');
 const { initSocket } = require('./socket');
 
@@ -19,8 +20,13 @@ const PORT = process.env.PORT || 3001;
 // Initialize Socket.IO
 initSocket(server);
 
-app.use(cors());
+app.use(cors({
+  origin: (origin, cb) => cb(null, origin || true),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+}));
 app.use(express.json());
+app.use(cookieParser());
 
 app.use('/auth', authRoutes);
 app.use('/users', userRoutes);

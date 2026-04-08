@@ -5,13 +5,18 @@ const jwt = require('jsonwebtoken');
  * Expects: Authorization: Bearer <token>
  */
 function verifyGoTrueJWT(req, res, next) {
-  const authHeader = req.headers.authorization;
+  let token = req.cookies?.auth_token;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing or invalid Authorization header' });
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    }
   }
 
-  const token = authHeader.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ error: 'Missing authentication token' });
+  }
 
   try {
     const decoded = jwt.verify(token, process.env.GOTRUE_JWT_SECRET);

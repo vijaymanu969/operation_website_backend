@@ -7,12 +7,24 @@ const userSockets = new Map();
 
 function initSocket(httpServer) {
   io = new Server(httpServer, {
-    cors: { origin: '*', methods: ['GET', 'POST'] },
+    cors: {
+      origin: (origin, cb) => cb(null, origin || true),
+      methods: ['GET', 'POST'],
+      credentials: true,
+    },
   });
 
   // Auth middleware — verify JWT on connection
   io.use((socket, next) => {
-    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    let token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    if (!token) {
+      // Fallback: read from auth_token cookie
+      const cookieHeader = socket.handshake.headers?.cookie;
+      if (cookieHeader) {
+        const match = cookieHeader.split(';').map((c) => c.trim()).find((c) => c.startsWith('auth_token='));
+        if (match) token = decodeURIComponent(match.substring('auth_token='.length));
+      }
+    }
     if (!token) return next(new Error('Authentication required'));
 
     try {
