@@ -20,11 +20,24 @@ const PORT = process.env.PORT || 3001;
 // Initialize Socket.IO
 initSocket(server);
 
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: (origin, cb) => cb(null, origin || true),
+  origin: (origin, cb) => {
+    // allow same-origin / curl / server-to-server (no Origin header)
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+    return cb(new Error(`Origin ${origin} not allowed by CORS`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
+app.options('*', cors());
 app.use(express.json());
 app.use(cookieParser());
 
@@ -35,6 +48,10 @@ app.use('/tasks', taskRoutes);
 app.use('/chat', chatRoutes);
 app.use('/idea-requests', ideaRequestRoutes);
 app.use('/analytics', analyticsRoutes);
+
+app.get('/', (req, res) => {
+  res.send('server runing');
+});
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });

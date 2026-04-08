@@ -32,8 +32,8 @@ async function login(req, res) {
 
     res.cookie('auth_token', token, {
       httpOnly: true,
-      secure: false,
-      sameSite: false,
+      secure: true,
+      sameSite: 'none',
       maxAge: 24 * 60 * 60 * 1000,
       path: '/',
     });
@@ -111,8 +111,8 @@ async function changePassword(req, res) {
 async function logout(req, res) {
   res.clearCookie('auth_token', {
     httpOnly: true,
-    secure: false,
-    sameSite: false,
+    secure: true,
+    sameSite: 'none',
     path: '/',
   });
   return res.json({ message: 'Logged out' });

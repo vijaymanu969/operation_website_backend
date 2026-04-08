@@ -181,18 +181,38 @@ async function deleteUser(req, res) {
       return res.status(403).json({ error: 'Cannot delete yourself' });
     }
 
+    const existing = await pool.query(
+      'SELECT id, role, is_active FROM ops_users WHERE id = $1',
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // admin can only delete workers/interns
+    if (req.user.role === 'admin' && !ADMIN_MANAGED_ROLES.includes(existing.rows[0].role)) {
+      return res.status(403).json({ error: 'Admins can only delete worker or intern accounts' });
+    }
+
+    // If already inactive, hard-delete the row
+    if (existing.rows[0].is_active === false) {
+      await pool.query('DELETE FROM ops_page_access WHERE user_id = $1', [id]);
+      await pool.query('DELETE FROM ops_users WHERE id = $1', [id]);
+      return res.json({ message: 'User permanently deleted', id });
+    }
+
+    // First delete: soft-deactivate
     const result = await pool.query(
       `UPDATE ops_users SET is_active = false WHERE id = $1
        RETURNING id, name, email, role, is_active`,
       [id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
     return res.json({ message: 'User deactivated', user: result.rows[0] });
   } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'User has related records and cannot be deleted' });
+    }
     return res.status(500).json({ error: 'Failed to delete user' });
   }
 }

@@ -6,9 +6,20 @@ let io = null;
 const userSockets = new Map();
 
 function initSocket(httpServer) {
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+
   io = new Server(httpServer, {
     cors: {
-      origin: (origin, cb) => cb(null, origin || true),
+      origin: (origin, cb) => {
+        if (!origin) return cb(null, true);
+        if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+          return cb(null, true);
+        }
+        return cb(new Error(`Origin ${origin} not allowed by CORS`));
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },
