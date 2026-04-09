@@ -6,7 +6,7 @@ const ideaController = require('../controllers/ideaController');
 
 router.use(verifyGoTrueJWT);
 
-router.get('/', requireRole('admin', 'super_admin'), ideaController.listIdeaRequests);
+router.get('/', requireRole('admin', 'worker', 'intern', 'super_admin'), ideaController.listIdeaRequests);
 router.put('/:id', ideaController.reviewIdeaRequest);
 
 module.exports = router;

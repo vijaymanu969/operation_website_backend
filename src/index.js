@@ -41,6 +41,34 @@ app.options('*', cors());
 app.use(express.json());
 app.use(cookieParser());
 
+// Request logger: method, route, IP, client (browser/postman/curl/etc.)
+app.use((req, res, next) => {
+  const ua = req.headers['user-agent'] || '';
+  let client;
+  if (/PostmanRuntime/i.test(ua)) client = 'Postman';
+  else if (/insomnia/i.test(ua)) client = 'Insomnia';
+  else if (/curl/i.test(ua)) client = 'curl';
+  else if (/wget/i.test(ua)) client = 'wget';
+  else if (/Mozilla|Chrome|Safari|Firefox|Edge|OPR/i.test(ua)) client = 'Browser';
+  else if (!ua) client = 'Unknown';
+  else client = ua.split(' ')[0];
+
+  const ip =
+    (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+    req.ip ||
+    req.socket?.remoteAddress ||
+    '-';
+
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    console.log(
+      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} -> ${res.statusCode} ${ms.toFixed(1)}ms | ip=${ip} | client=${client}`
+    );
+  });
+  next();
+});
+
 app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
 app.use('/attendance', attendanceRoutes);

@@ -212,7 +212,7 @@ async function listTasks(req, res) {
     const conditions = [];
     const params = [];
 
-    // Non-admin roles only see tasks they are assigned to or reviewing
+    // Only admins see every task; workers/interns see only their assigned/reviewing tasks
     const isAdmin = ['admin', 'super_admin'].includes(req.user.role);
     if (!isAdmin) {
       params.push(req.user.id);

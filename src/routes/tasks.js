@@ -22,11 +22,11 @@ router.put('/reorder', requirePageAccess('tasks', 'edit'), taskController.reorde
 
 // Tasks CRUD
 router.get('/', requirePageAccess('tasks', 'view'), taskController.listTasks);
-router.post('/', requirePageAccess('tasks', 'edit'), taskController.createTask);
+router.post('/', requireRole('admin', 'worker', 'intern', 'super_admin'), taskController.createTask);
 router.get('/:id', requirePageAccess('tasks', 'view'), taskController.getTask);
-router.put('/:id', requirePageAccess('tasks', 'edit'), taskController.updateTask);
-router.delete('/', requirePageAccess('tasks', 'edit'), taskController.bulkDeleteTasks);
-router.delete('/:id', requirePageAccess('tasks', 'edit'), taskController.deleteTask);
+router.put('/:id', requireRole('admin', 'worker', 'intern', 'super_admin'), taskController.updateTask);
+router.delete('/', requireRole('admin', 'worker', 'intern', 'super_admin'), taskController.bulkDeleteTasks);
+router.delete('/:id', requireRole('admin', 'worker', 'intern', 'super_admin'), taskController.deleteTask);
 router.put('/:id/status', requirePageAccess('tasks', 'view'), taskController.changeStatus);
 router.get('/:id/comments', requirePageAccess('tasks', 'view'), taskController.listComments);
 router.post('/:id/comments', requirePageAccess('tasks', 'view'), taskController.addComment);
