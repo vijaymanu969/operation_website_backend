@@ -14,30 +14,58 @@ const ideaRequestRoutes = require('./routes/ideaRequests');
 const analyticsRoutes = require('./routes/analytics');
 
 const app = express();
+app.set('trust proxy', 1); // honor X-Forwarded-Proto from nginx for req.secure
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3001;
 
 // Initialize Socket.IO
 initSocket(server);
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+// Allowlist supports exact origins ("https://ops.conveylabs.ai") and
+// wildcard ports for local dev ("http://localhost:*", "http://127.0.0.1:*").
+const rawAllowed = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+
+const exactAllowed = new Set();
+const patternAllowed = [];
+for (const entry of rawAllowed) {
+  if (entry.includes('*')) {
+    // Escape regex metachars, then turn `*` into `.*`
+    const re = new RegExp(
+      '^' + entry.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$'
+    );
+    patternAllowed.push(re);
+  } else {
+    exactAllowed.add(entry);
+  }
+}
+
+function isOriginAllowed(origin) {
+  if (exactAllowed.size === 0 && patternAllowed.length === 0) return true;
+  if (exactAllowed.has(origin)) return true;
+  return patternAllowed.some((re) => re.test(origin));
+}
 
 app.use(cors({
   origin: (origin, cb) => {
     // allow same-origin / curl / server-to-server (no Origin header)
     if (!origin) return cb(null, true);
-    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
-      return cb(null, true);
-    }
+    if (isOriginAllowed(origin)) return cb(null, true);
     return cb(new Error(`Origin ${origin} not allowed by CORS`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
-app.options('*', cors());
+app.options('*', cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (isOriginAllowed(origin)) return cb(null, true);
+    return cb(new Error(`Origin ${origin} not allowed by CORS`));
+  },
+  credentials: true,
+}));
 app.use(express.json());
 app.use(cookieParser());
 

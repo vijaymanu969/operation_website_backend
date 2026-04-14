@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { findOrCreateDirectConversation, createTaskReviewMessage } = require('../helpers/chatHelpers');
+const { findOrCreateDirectConversation, createTaskReviewMessage, createTaskCreatedMessage } = require('../helpers/chatHelpers');
 const { emitToUsers } = require('../socket');
 
 // ── Helpers: Types ──────────────────────────────────────────────────────────
@@ -334,6 +334,21 @@ async function createTask(req, res) {
 
     if (Array.isArray(type_ids) && type_ids.length > 0) {
       await replaceTaskTypes(task.id, type_ids);
+    }
+
+    // Chat integration: send a task_created card to each assignee-reviewer DM,
+    // same pattern as submit for review. Creator is the sender.
+    if (assignees.length > 0 && reviewers.length > 0) {
+      try {
+        for (const aId of assignees) {
+          for (const rId of reviewers) {
+            const convId = await findOrCreateDirectConversation(aId, rId);
+            await createTaskCreatedMessage(convId, req.user.id, task.id);
+          }
+        }
+      } catch (chatErr) {
+        // Don't fail task creation if chat integration fails
+      }
     }
 
     await enrichTask(task);

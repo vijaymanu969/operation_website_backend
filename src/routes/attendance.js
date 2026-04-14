@@ -6,17 +6,23 @@ const attendanceController = require('../controllers/attendanceController');
 
 router.use(verifyGoTrueJWT);
 
-router.get('/', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.list);
-router.post('/bulk', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.bulkUpsert);
-router.put('/:id', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.update);
-router.delete('/:id', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.delete);
-router.get('/summary', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.summary);
-router.get('/analysis', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.analysis);
-router.get('/daily', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.daily);
-router.get('/trends', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.trends);
-router.get('/punctuality', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.punctuality);
-router.get('/comparison', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.comparison);
-router.get('/leave-patterns', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.leavePatterns);
-router.post('/import', requireRole('admin', 'worker', 'intern', 'super_admin'), attendanceController.upload.single('file'), attendanceController.importExcel);
+const ATTENDANCE_ROLES = ['admin', 'worker', 'intern', 'super_admin'];
+
+// Reads — require at least 'view' on attendance page
+router.get('/', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.list);
+router.get('/summary', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.summary);
+router.get('/analysis', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.analysis);
+router.get('/daily', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.daily);
+router.get('/trends', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.trends);
+router.get('/punctuality', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.punctuality);
+router.get('/comparison', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.comparison);
+router.get('/leave-patterns', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'view'), attendanceController.leavePatterns);
+
+// Writes — require 'edit' on attendance page
+router.post('/bulk', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'edit'), attendanceController.bulkUpsert);
+router.delete('/by-date', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'edit'), attendanceController.deleteByDate);
+router.put('/:id', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'edit'), attendanceController.update);
+router.delete('/:id', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'edit'), attendanceController.delete);
+router.post('/import', requireRole(...ATTENDANCE_ROLES), requirePageAccess('attendance', 'edit'), attendanceController.upload.single('file'), attendanceController.importExcel);
 
 module.exports = router;

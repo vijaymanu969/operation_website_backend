@@ -30,10 +30,15 @@ async function login(req, res) {
       { expiresIn: '24h' }
     );
 
+    // Decide cookie flags from the actual request protocol, not the Origin.
+    // HTTPS (prod, or via nginx) → Secure + SameSite=None (works cross-site).
+    // HTTP  (local backend only) → non-Secure + SameSite=Lax (Chrome rejects Secure+None over HTTP).
+    const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
     res.cookie('auth_token', token, {
       httpOnly: true,
-      secure: true,
-      sameSite: 'none',
+      secure: isHttps,
+      sameSite: isHttps ? 'none' : 'lax',
       maxAge: 24 * 60 * 60 * 1000,
       path: '/',
     });
@@ -109,10 +114,12 @@ async function changePassword(req, res) {
 }
 
 async function logout(req, res) {
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
   res.clearCookie('auth_token', {
     httpOnly: true,
-    secure: true,
-    sameSite: 'none',
+    secure: isHttps,
+    sameSite: isHttps ? 'none' : 'lax',
     path: '/',
   });
   return res.json({ message: 'Logged out' });

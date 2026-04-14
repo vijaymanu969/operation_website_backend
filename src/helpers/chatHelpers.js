@@ -47,4 +47,14 @@ async function createTaskReviewMessage(conversationId, senderId, taskId) {
   return result.rows[0];
 }
 
-module.exports = { findOrCreateDirectConversation, createTaskReviewMessage };
+async function createTaskCreatedMessage(conversationId, senderId, taskId) {
+  const result = await pool.query(
+    `INSERT INTO ops_messages (conversation_id, sender_id, type, task_id)
+     VALUES ($1, $2, 'task_created', $3)
+     RETURNING *`,
+    [conversationId, senderId, taskId]
+  );
+  return result.rows[0];
+}
+
+module.exports = { findOrCreateDirectConversation, createTaskReviewMessage, createTaskCreatedMessage };

@@ -8,7 +8,7 @@ async function listConversations(req, res) {
     const { search } = req.query;
 
     const convResult = await pool.query(
-      `SELECT c.id, c.type, c.name, c.created_at
+      `SELECT c.id, c.type, c.name, c.created_at, c.created_by
        FROM ops_conversations c
        JOIN ops_conversation_members m ON m.conversation_id = c.id
        WHERE m.user_id = $1`,
@@ -55,6 +55,7 @@ async function listConversations(req, res) {
         type: conv.type,
         name: displayName,
         created_at: conv.created_at,
+        created_by: conv.created_by,
         members: members.rows,
         last_message: lastMsg.rows[0] || null,
       });
@@ -119,8 +120,8 @@ async function createConversation(req, res) {
       }
 
       const conv = await pool.query(
-        `INSERT INTO ops_conversations (type, name) VALUES ('group', $1) RETURNING *`,
-        [name]
+        `INSERT INTO ops_conversations (type, name, created_by) VALUES ('group', $1, $2) RETURNING *`,
+        [name, userId]
       );
       const convId = conv.rows[0].id;
 
@@ -192,9 +193,9 @@ async function getMessages(req, res) {
     const hasMore = result.rows.length > limit;
     const messages = result.rows.slice(0, limit);
 
-    // For task_review messages, fetch task details (using junction tables)
+    // For task_review and task_created messages, fetch task details (using junction tables)
     for (const msg of messages) {
-      if (msg.type === 'task_review' && msg.task_id) {
+      if ((msg.type === 'task_review' || msg.type === 'task_created') && msg.task_id) {
         const taskResult = await pool.query(
           `SELECT t.id, t.title, t.description, t.priority, t.status,
                   t.date, t.end_date, t.column_group, t.is_paused
@@ -400,4 +401,121 @@ async function reviewTask(req, res) {
   }
 }
 
-module.exports = { listConversations, createConversation, getMessages, sendMessage, reviewTask };
+async function deleteConversation(req, res) {
+  try {
+    const { id } = req.params;
+
+    const conv = await pool.query('SELECT type, created_by FROM ops_conversations WHERE id = $1', [id]);
+    if (conv.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    if (conv.rows[0].type === 'direct') {
+      return res.status(400).json({ error: 'Direct conversations cannot be deleted' });
+    }
+
+    const isCreator = conv.rows[0].created_by === req.user.id;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    if (!isCreator && !isSuperAdmin) {
+      return res.status(403).json({ error: 'Only the group creator or super_admin can delete this conversation' });
+    }
+
+    // Messages and members cascade-delete via FK ON DELETE CASCADE
+    await pool.query('DELETE FROM ops_conversations WHERE id = $1', [id]);
+
+    return res.json({ message: 'Conversation deleted' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete conversation' });
+  }
+}
+
+async function addMembers(req, res) {
+  try {
+    const { id } = req.params;
+    const { member_ids } = req.body;
+
+    if (!Array.isArray(member_ids) || member_ids.length === 0) {
+      return res.status(400).json({ error: 'member_ids must be a non-empty array' });
+    }
+
+    const conv = await pool.query('SELECT type, created_by FROM ops_conversations WHERE id = $1', [id]);
+    if (conv.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    if (conv.rows[0].type === 'direct') {
+      return res.status(400).json({ error: 'Cannot add members to a direct conversation' });
+    }
+
+    const isCreator = conv.rows[0].created_by === req.user.id;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    if (!isCreator && !isSuperAdmin) {
+      return res.status(403).json({ error: 'Only the group creator or super_admin can add members' });
+    }
+
+    for (const userId of member_ids) {
+      await pool.query(
+        `INSERT INTO ops_conversation_members (conversation_id, user_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [id, userId]
+      );
+    }
+
+    const members = await pool.query(
+      `SELECT u.id, u.name, u.role, u.color
+       FROM ops_conversation_members m
+       JOIN ops_users u ON u.id = m.user_id
+       WHERE m.conversation_id = $1`,
+      [id]
+    );
+
+    return res.json({ members: members.rows });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to add members' });
+  }
+}
+
+async function removeMember(req, res) {
+  try {
+    const { id, user_id } = req.params;
+
+    const conv = await pool.query('SELECT type, created_by FROM ops_conversations WHERE id = $1', [id]);
+    if (conv.rows.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    if (conv.rows[0].type === 'direct') {
+      return res.status(400).json({ error: 'Cannot remove members from a direct conversation' });
+    }
+
+    const isCreator = conv.rows[0].created_by === req.user.id;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    if (!isCreator && !isSuperAdmin) {
+      return res.status(403).json({ error: 'Only the group creator or super_admin can remove members' });
+    }
+
+    const countResult = await pool.query(
+      'SELECT COUNT(*)::int AS cnt FROM ops_conversation_members WHERE conversation_id = $1',
+      [id]
+    );
+    if (countResult.rows[0].cnt <= 1) {
+      return res.status(400).json({ error: 'Cannot remove the last member of a group' });
+    }
+
+    await pool.query(
+      'DELETE FROM ops_conversation_members WHERE conversation_id = $1 AND user_id = $2',
+      [id, user_id]
+    );
+
+    const members = await pool.query(
+      `SELECT u.id, u.name, u.role, u.color
+       FROM ops_conversation_members m
+       JOIN ops_users u ON u.id = m.user_id
+       WHERE m.conversation_id = $1`,
+      [id]
+    );
+
+    return res.json({ members: members.rows });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to remove member' });
+  }
+}
+
+module.exports = { listConversations, createConversation, getMessages, sendMessage, reviewTask, addMembers, removeMember, deleteConversation };

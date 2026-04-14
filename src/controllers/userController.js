@@ -121,7 +121,7 @@ async function getUser(req, res) {
 async function updateUser(req, res) {
   try {
     const { id } = req.params;
-    const { name, email, role, is_active, color } = req.body;
+    const { name, email, role, is_active, color, password } = req.body;
 
     // Fetch target user
     const existing = await pool.query('SELECT role FROM ops_users WHERE id = $1', [id]);
@@ -136,6 +136,10 @@ async function updateUser(req, res) {
       }
       if (role && !ADMIN_MANAGED_ROLES.includes(role)) {
         return res.status(403).json({ error: 'Admins can only assign worker or intern roles' });
+      }
+      // admins cannot reset passwords — only super_admin can
+      if (password !== undefined) {
+        return res.status(403).json({ error: 'Admins cannot reset passwords' });
       }
     }
 
@@ -152,6 +156,15 @@ async function updateUser(req, res) {
     if (role !== undefined) { params.push(role); fields.push(`role = $${params.length}`); }
     if (is_active !== undefined) { params.push(is_active); fields.push(`is_active = $${params.length}`); }
     if (color !== undefined) { params.push(color); fields.push(`color = $${params.length}`); }
+
+    if (password !== undefined) {
+      if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      }
+      const hash = await bcrypt.hash(password, 10);
+      params.push(hash);
+      fields.push(`password_hash = $${params.length}`);
+    }
 
     if (fields.length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
@@ -237,6 +250,18 @@ async function setAccess(req, res) {
 
     if (!Array.isArray(pages)) {
       return res.status(400).json({ error: 'pages must be an array of {page_name, permission}' });
+    }
+
+    // Validate every entry — only 'view' or 'edit' are accepted, anything else
+    // would silently break requirePageAccess checks downstream.
+    const VALID_PERMS = new Set(['view', 'edit']);
+    for (const p of pages) {
+      if (!p || typeof p.page_name !== 'string' || !p.page_name.trim()) {
+        return res.status(400).json({ error: 'Each page entry must have a non-empty page_name' });
+      }
+      if (p.permission !== undefined && !VALID_PERMS.has(p.permission)) {
+        return res.status(400).json({ error: `Invalid permission '${p.permission}' for page '${p.page_name}' — must be 'view' or 'edit'` });
+      }
     }
 
     // Check target user exists

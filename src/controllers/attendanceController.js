@@ -58,27 +58,70 @@ function defaultDateRange(start_date, end_date) {
   return { start_date, end_date };
 }
 
-// Parse hours from raw_value like "11:45:00-9:45" → 9.75 hours
+// Parse a single clock-time string like "9:30", "11:45", or "11:45:00"
+// into { h, m }. Returns null for empty or malformed input.
+function parseClockTime(s) {
+  if (!s) return null;
+  const parts = s.split(':');
+  const h = parseInt(parts[0], 10);
+  const m = parts.length >= 2 ? parseInt(parts[1], 10) : 0;
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return { h, m };
+}
+
+// Infer the worked interval in minutes-since-midnight.
+// Convention: raw_value is LOGIN-LOGOUT. Both times are written without
+// AM/PM markers; logins are morning (AM), and the logout is assumed to be
+// PM whenever its numeric value is ≤ the login time (e.g. "11:45-9:45"
+// means 11:45 AM → 9:45 PM = 600 minutes). Same-day half-shifts where the
+// logout is genuinely later that morning (e.g. "09:00-11:30") still parse
+// as-is because logout > login.
+function inferIntervalMinutes(login, logout) {
+  const loginMin = login.h * 60 + login.m;
+  let logoutMin = logout.h * 60 + logout.m;
+  if (logoutMin <= loginMin) {
+    logoutMin += 12 * 60;
+  }
+  return { loginMin, logoutMin, durationMin: logoutMin - loginMin };
+}
+
+// Parse hours worked from raw_value like "11:45:00-9:45" → 10 hours.
 function parseHours(raw) {
   if (!raw || raw.trim() === '') return 0;
 
   const trimmed = raw.trim().toLowerCase();
   if (trimmed.startsWith('leave')) return 0;
 
-  // Look for pattern like "HH:MM:SS-H:MM" or "HH:MM-H:MM"
   const dashIndex = trimmed.indexOf('-');
   if (dashIndex === -1) return 0;
 
-  const hoursPart = trimmed.substring(dashIndex + 1).trim();
-  const parts = hoursPart.split(':');
+  const login = parseClockTime(trimmed.substring(0, dashIndex).trim());
+  const logout = parseClockTime(trimmed.substring(dashIndex + 1).trim());
+  if (!login || !logout) return 0;
 
-  if (parts.length >= 2) {
-    const h = parseFloat(parts[0]) || 0;
-    const m = parseFloat(parts[1]) || 0;
-    return h + m / 60;
-  }
+  const { durationMin } = inferIntervalMinutes(login, logout);
+  if (durationMin <= 0) return 0;
+  return durationMin / 60;
+}
 
-  return parseFloat(hoursPart) || 0;
+// Parse the logout clock time from raw_value like "11:45-9:45" → "21:45"
+// (24-hour, PM inference applied). Returns null for leave/absent rows.
+function parseLogoutTime(raw) {
+  if (!raw || raw.trim() === '') return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed.startsWith('leave')) return null;
+
+  const dashIndex = trimmed.indexOf('-');
+  if (dashIndex === -1) return null;
+
+  const login = parseClockTime(trimmed.substring(0, dashIndex).trim());
+  const logout = parseClockTime(trimmed.substring(dashIndex + 1).trim());
+  if (!login || !logout) return null;
+
+  const { logoutMin } = inferIntervalMinutes(login, logout);
+  const h = Math.floor(logoutMin / 60) % 24;
+  const m = logoutMin % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
 async function list(req, res) {
@@ -110,7 +153,13 @@ async function list(req, res) {
     query += ' ORDER BY a.date DESC, u.name ASC';
 
     const result = await pool.query(query, params);
-    return res.json(result.rows);
+    const rows = result.rows.map(row => ({
+      ...row,
+      login_time: parseLoginTime(row.raw_value),
+      logout_time: parseLogoutTime(row.raw_value),
+      hours_worked: Math.round(parseHours(row.raw_value) * 100) / 100,
+    }));
+    return res.json(rows);
   } catch (err) {
     return res.status(500).json({ error: 'Failed to list attendance' });
   }
@@ -192,6 +241,25 @@ async function deleteEntry(req, res) {
     return res.json({ message: 'Deleted', row: result.rows[0] });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to delete attendance' });
+  }
+}
+
+async function deleteByDate(req, res) {
+  try {
+    const { date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ error: 'date query param is required (YYYY-MM-DD)' });
+    }
+
+    const result = await pool.query(
+      'DELETE FROM ops_attendance WHERE date = $1 RETURNING id, user_id, date',
+      [date]
+    );
+
+    return res.json({ message: `Deleted ${result.rows.length} record(s) for ${date}`, deleted: result.rows.length });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete attendance for date' });
   }
 }
 
@@ -473,6 +541,7 @@ async function daily(req, res) {
 
     const rows = result.rows.map(row => {
       const loginTime = parseLoginTime(row.raw_value);
+      const logoutTime = parseLogoutTime(row.raw_value);
       const hoursWorked = parseHours(row.raw_value);
       return {
         user_id: row.user_id,
@@ -480,6 +549,7 @@ async function daily(req, res) {
         date: new Date(row.date).toISOString().split('T')[0],
         raw_value: row.raw_value,
         login_time: loginTime,
+        logout_time: logoutTime,
         hours_worked: Math.round(hoursWorked * 100) / 100,
         is_leave: row.is_leave,
         is_late: isLate(loginTime),
@@ -765,4 +835,4 @@ async function leavePatterns(req, res) {
   }
 }
 
-module.exports = { list, bulkUpsert, update, delete: deleteEntry, summary, importExcel, upload, analysis, daily, trends, punctuality, comparison, leavePatterns };
+module.exports = { list, bulkUpsert, update, delete: deleteEntry, deleteByDate, summary, importExcel, upload, analysis, daily, trends, punctuality, comparison, leavePatterns };

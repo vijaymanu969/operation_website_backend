@@ -219,7 +219,13 @@ async function dashboard(req, res) {
 
 async function taskPerformance(req, res) {
   try {
-    const { user_id, start_date, end_date } = req.query;
+    let { user_id, start_date, end_date } = req.query;
+
+    // Workers and interns can only see their own performance
+    const isAdmin = ['admin', 'super_admin'].includes(req.user.role);
+    if (!isAdmin) {
+      user_id = req.user.id;
+    }
 
     // Build date filter
     const dateConditions = [];
@@ -476,4 +482,9 @@ async function userSummary(req, res) {
   }
 }
 
-module.exports = { dashboard, taskPerformance, userSummary };
+async function mySummary(req, res) {
+  req.params.id = req.user.id;
+  return userSummary(req, res);
+}
+
+module.exports = { dashboard, taskPerformance, userSummary, mySummary };
